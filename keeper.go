@@ -18,18 +18,22 @@ type History struct {
 }
 
 func addMessagesFromSlackHistory(historyCollection *mgo.Collection,	chatCollection *mgo.Collection, getHistory func(string, slack.HistoryParameters)(*slack.History, error)){
-	var chatId map[string]string
-	// iterate through each group's ID in MongoDB
-	iter := chatCollection.Find(nil).Select(bson.M{"_id":1}).Iter()
-	for iter.Next(&chatId){
-		gId := chatId["_id"]
+	var chat map[string]string
+	// iterate through each group/channel's ID in MongoDB
+	iter := chatCollection.Find(nil).Select(bson.M{"_id":1, "name":1}).Iter()
+	for iter.Next(&chat){
+		cId := chat["_id"]
+		cName := chat["name"]
 		messageHistory := new(History)
-		// find current group's history record in the collection
-		err :=	historyCollection.Find(bson.M{"_id":gId}).One(&messageHistory)
+		log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+		log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+		log.Println("~~~~~~~~~ Slack History for " + cName + "(" + cId + ") ~~~~~~~~~")
+		// find current group/channel's history record in the collection
+		err :=	historyCollection.Find(bson.M{"_id":cId}).One(&messageHistory)
 		if err != nil {
-			// if there is not record for this group yet, initialize the history to read from the start of it's slack history
+			// if there is not record for this group/channel yet, initialize the history to read from the start of it's slack history
 			if err == mgo.ErrNotFound {
-				messageHistory.Id = gId
+				messageHistory.Id = cId
 				messageHistory.Latest = "0"
 				messageHistory.Messages = []slack.Message{}
 			} else {
@@ -42,22 +46,22 @@ func addMessagesFromSlackHistory(historyCollection *mgo.Collection,	chatCollecti
 		hasMore := true
 		latestTime := strconv.FormatInt(time.Now().Unix(), 10)
 		oldestTime := messageHistory.Latest
-		// get the slack conversations tied to the group, continue to run in loop
+		// get the slack conversations tied to the group/channel, continue to run in loop
 		// while hasMore variable indicates more slack history objects to query and save
 		for hasMore {
 			params := slack.HistoryParameters{Count: 100, Latest: latestTime, Oldest: oldestTime}
-			history, _ := getHistory(gId, params)
+			history, _ := getHistory(cId, params)
 			jsonHistory, _ := json.Marshal(history)
-			log.Print("--- History from Slack ---\r\n"+string(jsonHistory))
+			log.Print("--- [" + time.Now().String() + "] History from Slack\r\n"+string(jsonHistory))
 
 			// Add to Messages to collection
-			info, err := historyCollection.UpsertId(gId,
+			info, err := historyCollection.UpsertId(cId,
 				bson.M{"$addToSet": bson.M{"Messages": bson.M{"$each": history.Messages } } })
 			if err != nil {
 				panic(err)
 			}
 			jsonInfo, _ := json.Marshal(info)
-			log.Print("--- Added Messages to history collection ---\r\n"+string(jsonInfo))
+			log.Print("--- [" + time.Now().String() + "] Added Messages to history collection\r\n"+string(jsonInfo))
 
 			// if this is the first iteration in the for loop assign the first message's
 			// timestamp as the new Latest value to save for the current group's history
@@ -65,13 +69,13 @@ func addMessagesFromSlackHistory(historyCollection *mgo.Collection,	chatCollecti
 				var ts string
 				if len(history.Messages) > 0 {
 					ts = history.Messages[0].Timestamp
-					info, err := historyCollection.UpsertId(gId,
+					info, err := historyCollection.UpsertId(cId,
 						bson.M{"$set" : bson.M{"latest" : ts}})
 					if err != nil {
 						panic(err)
 					}
 					jsonInfo, _ := json.Marshal(info)
-					log.Print("--- Updated Latest Timestamp ---\r\n"+string(jsonInfo))
+					log.Print("--- [" + time.Now().String() + "] Updated Latest Timestamp\r\n"+string(jsonInfo))
 				}
 				isFirstRun = false
 			}
@@ -92,6 +96,9 @@ func updateGroupsFromSlack(db *mgo.Database, api *slack.Client, historyCollectio
 	if err != nil {
 		panic(err)
 	}
+	log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	log.Println("~~~~~~~~~~~~~~~ Updating Slack Groups  ~~~~~~~~~~~~~~~~~~~")
 	// loop through current list and update the collection in MongoDB
 	for _, group := range groups {
 		groupJson, err := json.Marshal(&group)
@@ -99,6 +106,8 @@ func updateGroupsFromSlack(db *mgo.Database, api *slack.Client, historyCollectio
 		if err := json.Unmarshal(groupJson, &groupData); err != nil {
 			panic(err)
 		}
+
+		log.Println("---- [" + time.Now().String() + "] Slack Group : " + group.Name + "(" + group.ID + ")")
 		_, err = groupsCollection.Upsert(bson.M{"_id": group.ID}, groupData)
 		if err != nil {
 			panic(err)
@@ -115,6 +124,9 @@ func updateChannelsFromSlack(db *mgo.Database, api *slack.Client, historyCollect
 	if err != nil {
 		panic(err)
 	}
+	log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	log.Println("~~~~~~~~~~~~~~ Updating Slack Channels  ~~~~~~~~~~~~~~~~~~")
 	// loop through current list and update the collection in MongoDB
 	for _, channel := range channels {
 		channelJson, err := json.Marshal(&channel)
@@ -122,12 +134,40 @@ func updateChannelsFromSlack(db *mgo.Database, api *slack.Client, historyCollect
 		if err := json.Unmarshal(channelJson, &channelData); err != nil {
 			panic(err)
 		}
+
+		log.Println("---- [" + time.Now().String() + "] Slack Channel : " + channel.Name + "(" + channel.ID + ")")
 		_, err = channelsCollection.Upsert(bson.M{"_id": channel.ID}, channelData)
 		if err != nil {
 			panic(err)
 		}
 	}
 	addMessagesFromSlackHistory(historyCollection, channelsCollection, api.GetChannelHistory)
+}
+
+func updateUsersFromSlack(db *mgo.Database, api *slack.Client) {
+	usersCollection := db.C("users")
+	// get latest list of channels from api
+	users, err := api.GetUsers()
+	if err != nil {
+		panic(err)
+	}
+	log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	log.Println("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+	log.Println("~~~~~~~~~~~~~~ Updating Slack Users  ~~~~~~~~~~~~~~~~~~")
+	// loop through current list and update the collection in MongoDB
+	for _, user := range users {
+		userJson, err := json.Marshal(&user)
+		var userData map[string]interface{}
+		if err := json.Unmarshal(userJson, &userData); err != nil {
+			panic(err)
+		}
+
+		log.Println("---- [" + time.Now().String() + "] Slack User : " + user.Name + "(" + user.ID + ")")
+		_, err = usersCollection.Upsert(bson.M{"_id": user.ID}, userData)
+		if err != nil {
+			panic(err)
+		}
+	}
 }
 
 func main() {
@@ -141,6 +181,7 @@ func main() {
 	api := slack.New(os.Getenv("SLACK_TOKEN"))
 	historyCollection := db.C("history")
 
+	updateUsersFromSlack(db, api)
 	updateGroupsFromSlack(db, api, historyCollection)
 	updateChannelsFromSlack(db, api, historyCollection)
 }
