@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"github.com/jasonlvhit/gocron"
 	"github.com/nlopes/slack"
 	"gopkg.in/mgo.v2"
 	"encoding/json"
@@ -170,6 +171,12 @@ func updateUsersFromSlack(db *mgo.Database, api *slack.Client) {
 	}
 }
 
+func updateAllFromSlack(db *mgo.Database, api *slack.Client, historyCollection *mgo.Collection) {
+	updateUsersFromSlack(db, api)
+	updateGroupsFromSlack(db, api, historyCollection)
+	updateChannelsFromSlack(db, api, historyCollection)
+}
+
 func main() {
 	session, err := mgo.Dial(os.Getenv("MONGODB_URL"))
 	if err != nil {
@@ -181,7 +188,7 @@ func main() {
 	api := slack.New(os.Getenv("SLACK_TOKEN"))
 	historyCollection := db.C("history")
 
-	updateUsersFromSlack(db, api)
-	updateGroupsFromSlack(db, api, historyCollection)
-	updateChannelsFromSlack(db, api, historyCollection)
+	s := gocron.NewScheduler()
+	s.Every(1).Day().At(os.Getenv("CRON_TIME")).Do(updateAllFromSlack, db, api, historyCollection)
+	<- s.Start()
 }
